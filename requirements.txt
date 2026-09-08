@@ -57,7 +57,7 @@ requests==2.34.2
 requests-oauthlib==2.0.0
 
 # Google integration
-google-api-python-client==2.199.0
+google-api-python-client==2.200.0
 google-auth-oauthlib==1.4.1
 google-cloud-storage==3.0.0
 
@@ -75,12 +75,12 @@ pillow==12.3.0
 # leave some open (PYSEC-2026-3552 needs 50.0.0).
 cryptography==50.0.0
 # Brute-force protection on login (lockout by username+IP).
-django-axes[ipware]==8.0.0
+django-axes[ipware]==8.3.1
 # Error tracking. Inert unless SENTRY_DSN is set.
 sentry-sdk[django]==2.20.0
 
 # Notifications
-swapper==1.4.0
+swapper==1.5.0
 
 # Static files
 whitenoise==6.9.0
@@ -98,7 +98,7 @@ click==8.5.0
 phonenumbers==9.0.37
 pycountry==24.6.1
 python-bidi==0.6.11
-rapidfuzz==3.9.6
+rapidfuzz==3.14.6
 spacy==3.8.16
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
