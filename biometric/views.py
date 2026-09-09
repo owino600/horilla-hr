@@ -13,7 +13,6 @@ from threading import Event, Thread
 from urllib.parse import parse_qs, unquote
 
 import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
 from django.conf import settings
 from django.contrib import messages
 from django.db.models import Q
@@ -428,13 +427,6 @@ def biometric_device_schedule(request, device_id):
                     device.is_scheduler = True
                     device.is_live = False
                     device.save()
-                    scheduler = BackgroundScheduler()
-                    scheduler.add_job(
-                        lambda: zk_biometric_attendance_scheduler(device.id),
-                        "interval",
-                        seconds=str_time_seconds(device.scheduler_duration),
-                    )
-                    scheduler.start()
                     return HorillaRedirect(request)
                 except Exception as error:
                     logger.error("An error comes in biometric_device_schedule ", error)
@@ -458,56 +450,24 @@ def biometric_device_schedule(request, device_id):
                 device.is_scheduler = True
                 device.scheduler_duration = duration
                 device.save()
-                scheduler = BackgroundScheduler()
-                scheduler.add_job(
-                    lambda: anviz_biometric_attendance_scheduler(device.id),
-                    "interval",
-                    seconds=str_time_seconds(device.scheduler_duration),
-                )
-                scheduler.start()
                 return HorillaRedirect(request)
             elif device.machine_type == "dahua":
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
                 device.save()
-                scheduler = BackgroundScheduler()
-                scheduler.add_job(
-                    lambda: dahua_biometric_attendance_scheduler(device.id),
-                    "interval",
-                    seconds=str_time_seconds(device.scheduler_duration),
-                )
-                scheduler.start()
                 return HorillaRedirect(request)
             elif device.machine_type == "cosec":
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
                 device.save()
-                scheduler = BackgroundScheduler()
-                existing_thread = settings.BIO_DEVICE_THREADS.get(device.id)
-                if existing_thread:
-                    existing_thread.stop()
-                    del settings.BIO_DEVICE_THREADS[device.id]
-                scheduler.add_job(
-                    lambda: cosec_biometric_attendance_scheduler(device.id),
-                    "interval",
-                    seconds=str_time_seconds(device.scheduler_duration),
-                )
-                scheduler.start()
                 return HorillaRedirect(request)
             elif device.machine_type == "etimeoffice":
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
                 device.save()
-                scheduler = BackgroundScheduler()
-                scheduler.add_job(
-                    lambda: etimeoffice_biometric_attendance_scheduler(device.id),
-                    "interval",
-                    seconds=str_time_seconds(device.scheduler_duration),
-                )
-                scheduler.start()
                 return HorillaRedirect(request)
             else:
                 return HorillaRedirect(request)
