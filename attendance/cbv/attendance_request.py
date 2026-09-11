@@ -197,7 +197,7 @@ class AttendancesRequestListView(HorillaListView):
         ("minimum_hour", _("Min Hour")),
         ("employee_id__employee_work_info__department_id", _("Department")),
         ("employee_id__employee_work_info__job_position_id", _("Job Position")),
-        ("employee_id__employee_work_info__employee_type_id", _("Employement Type")),
+        ("employee_id__employee_work_info__employee_type_id", _("Employment Type")),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
 
@@ -213,7 +213,10 @@ class AttendanceRequestListTab(AttendancesRequestListView):
         self.view_id = "attendance-requests-container"
         self.search_url = reverse("attendance-request-list-tab")
 
-    template_name = "cbv/attendance_request/attendance_request_tab.html"
+    # Renders through the shared generic list table (like the All Attendances
+    # tab); the per-field request highlighting that used to justify a forked
+    # template now comes from this per-cell class hook.
+    cell_class_method = "request_cell_classes"
 
     columns = [
         col for col in AttendancesRequestListView.columns if col[1] != "status_col"
@@ -392,7 +395,7 @@ class _AttendanceRequestTabNavBase(HorillaNavView):
         ("minimum_hour", _("Min Hour")),
         ("employee_id__employee_work_info__department_id", _("Department")),
         ("employee_id__employee_work_info__job_position_id", _("Job Position")),
-        ("employee_id__employee_work_info__employee_type_id", _("Employement Type")),
+        ("employee_id__employee_work_info__employee_type_id", _("Employment Type")),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
     # Mirrors AttendancesRequestListView.nested_group_by_fields below --
