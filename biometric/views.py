@@ -2130,7 +2130,9 @@ def zk_biometric_attendance_logs(device_or_devices):
     """
     Retrieve and process attendance logs from one or more ZKTeco biometric devices.
 
-    Handles scenarios where the same user_id may exist across multiple devices for the same employee.
+    The device fetch marker is advanced only after attendance records have been
+    successfully processed. This prevents failed records from being skipped
+    permanently on the next scheduler run.
 
     :param device_or_devices: A single BiometricDevice instance or a queryset/list of them.
     :return: Tuple (number_of_attendance_processed, error_message or None)
@@ -2155,6 +2157,7 @@ def zk_biometric_attendance_logs(device_or_devices):
         port_no = device.port
         machine_ip = device.machine_ip
         conn = None
+
         zk_device = ZK(
             machine_ip,
             port=port_no,
@@ -2168,10 +2171,9 @@ def zk_biometric_attendance_logs(device_or_devices):
             conn = zk_device.connect()
             conn.enable_device()
             attendances = conn.get_attendance()
+
             if not attendances:
                 continue
-
-            last_attendance_datetime = attendances[-1].timestamp
 
             if device.last_fetch_date and device.last_fetch_time:
                 filtered = [
@@ -2186,30 +2188,35 @@ def zk_biometric_attendance_logs(device_or_devices):
             else:
                 filtered = attendances
 
-            # Update last fetch markers
-            device.last_fetch_date = last_attendance_datetime.date()
-            device.last_fetch_time = last_attendance_datetime.time()
-            device.save()
+            # IMPORTANT:
+            # Do NOT update last_fetch_date/time here.
+            # The marker is updated only after successful processing below.
+
             for attendance in filtered:
-                attendance.device = device  # Attach device info
+                attendance.device = device
                 attendance.punch = (
                     patch_direction[device.device_direction]
                     if device.device_direction in patch_direction
                     else attendance.punch
-                )  # Update punch code based on device direction
+                )
                 combined_attendances.append(attendance)
 
         except zk_exception.ZKErrorResponse as e:
             errors.append(f"[{device.name}] ZKError: {str(e)}")
+
         except Exception as e:
             logger.error(f"[{device.name}] General Error", exc_info=True)
             errors.append(f"[{device.name}] Error: {str(e)}")
+
         finally:
             if conn:
                 conn.disconnect()
 
-    # Sort all filtered attendances by time
+    # Process records chronologically.
     combined_attendances.sort(key=lambda a: a.timestamp)
+
+    # Store the newest successfully processed timestamp for each device.
+    successful_device_timestamps = {}
 
     for attendance in combined_attendances:
         user_id = attendance.user_id
@@ -2218,27 +2225,69 @@ def zk_biometric_attendance_logs(device_or_devices):
         date = date_time.date()
         time = date_time.time()
         device_id = attendance.device.id
+
         bio_id = bio_id_map.get((device_id, user_id))
-        if bio_id:
-            request_data = Request(
-                user=bio_id.employee_id.employee_user_id,
-                date=date,
-                time=time,
-                datetime=date_time,
+
+        if not bio_id:
+            logger.warning(
+                f"[Device: {attendance.device.name}] "
+                f"No employee mapping for biometric user {user_id}"
             )
-            try:
-                if punch_code in {0, 3, 4}:
-                    clock_in(request_data)
-                elif punch_code in {1, 2, 5}:
-                    clock_out(request_data)
-            except Exception:
-                logger.error(
-                    f"[Device: {attendance.device.name}] Punch processing error",
-                    exc_info=True,
+            continue
+
+        request_data = Request(
+            user=bio_id.employee_id.employee_user_id,
+            date=date,
+            time=time,
+            datetime=date_time,
+        )
+
+        try:
+            if punch_code in {0, 3, 4}:
+                clock_in(request_data)
+
+            elif punch_code in {1, 2, 5}:
+                clock_out(request_data)
+
+            else:
+                logger.warning(
+                    f"[Device: {attendance.device.name}] "
+                    f"Unknown punch code {punch_code} for user {user_id}"
                 )
+                continue
+
+            # This record completed processing successfully.
+            previous = successful_device_timestamps.get(device_id)
+
+            if previous is None or attendance.timestamp > previous:
+                successful_device_timestamps[device_id] = attendance.timestamp
+
+        except Exception:
+            logger.error(
+                f"[Device: {attendance.device.name}] Punch processing error",
+                exc_info=True,
+            )
+
+    # IMPORTANT:
+    # Advance the fetch marker only after successful processing.
+    #
+    # If processing fails, that record remains ahead of the marker and will
+    # therefore be fetched and retried during the next scheduler run.
+    for device_id, latest_processed_timestamp in successful_device_timestamps.items():
+        device = BiometricDevices.objects.filter(pk=device_id).first()
+
+        if device:
+            device.last_fetch_date = latest_processed_timestamp.date()
+            device.last_fetch_time = latest_processed_timestamp.time()
+
+            device.save(
+                update_fields=[
+                    "last_fetch_date",
+                    "last_fetch_time",
+                ]
+            )
 
     return len(combined_attendances), "; ".join(errors) if errors else None
-
 
 def zk_biometric_attendance_scheduler(device_id):
     """
