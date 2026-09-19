@@ -5232,8 +5232,15 @@ if apps.is_installed("attendance"):
         and reload the list view of compensatory leave requests.
         """
         try:
-            comp_leave_req = CompensatoryLeaveRequest.objects.get(id=comp_id).delete()
-            messages.success(request, _("Compensatory leave request deleted."))
+            comp_leave_req = CompensatoryLeaveRequest.objects.get(id=comp_id)
+            if comp_leave_req.status == "approved":
+                messages.info(
+                    request,
+                    _("An approved compensatory leave request cannot be deleted."),
+                )
+            else:
+                comp_leave_req.delete()
+                messages.success(request, _("Compensatory leave request deleted."))
 
         except:
             messages.error(request, _("Sorry, something went wrong!"))
@@ -5830,5 +5837,27 @@ def leave_type_condition_delete(request, leave_type_id, condition_id):
         {
             "leave_type": leave_type,
             "condition_form": LeaveTypeConditionForm(),
+        },
+    )
+
+
+@login_required
+@hx_request_required
+@permission_required("leave.view_availableleave")
+def leave_balance_ledger(request, pk):
+    """
+    Renders the leave balance ledger sidebar for one AvailableLeave: a
+    chronological running-balance table combining every reset/carryforward
+    change (from its own history) with every approved leave request taken
+    against it.
+    """
+    instance = get_object_or_404(AvailableLeave, pk=pk)
+    return render(
+        request,
+        "cbv/assigned_leave/leave_ledger_sidebar.html",
+        {
+            "instance": instance,
+            "ledger": instance.build_ledger(),
+            "forecast": instance.forecast_next_reset(),
         },
     )
