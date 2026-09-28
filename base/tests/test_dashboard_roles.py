@@ -164,8 +164,13 @@ class ModernDashboardFetchInventoryTests(SimpleTestCase):
         self.assertIn(
             "present_on={% now 'Y-m-d' %}&is_active=True&filter_applied=on", text
         )
+        self.assertIn(
+            "expected_to_check_in={% now 'Y-m-d' %}&is_active=True&filter_applied=on",
+            text,
+        )
         self.assertIn("is_active=True&filter_applied=on", text)
-        self.assertIn("closed=false&filter_applied=on", text)
+        # Open Recruitments was deliberately dropped from the KPI row --
+        # dropped here to match, not restored in the template.
         self.assertIn("asset_request_status=Requested&filter_applied=1", text)
         self.assertIn(
             "view-reimbursement' %}?open_tab=1&status=requested&type=reimbursement&filter_applied=1",

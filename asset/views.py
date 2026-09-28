@@ -49,6 +49,7 @@ from asset.models import (
     AssetAssignment,
     AssetCategory,
     AssetDocuments,
+    AssetGeneralSetting,
     AssetLot,
     AssetRequest,
     ReturnImages,
@@ -59,6 +60,7 @@ from base.methods import (
     filtersubordinates,
     get_key_instances,
     get_pagination,
+    get_session_company,
     has_export_access,
     paginator_qry,
     sortby,
@@ -1405,7 +1407,7 @@ def spreadsheetml_asset_import(dataframe):
     for index, row in dataframe.iterrows():
         asset_name = convert_nan(row["Asset name"])
         asset_description = convert_nan(row["Description"])
-        asset_tracking_id = convert_nan(row["Tracking id"])
+        asset_tracking_id = convert_nan(row["Serial No."])
         purchase_date = convert_nan(row["Purchase date"])
         purchase_cost = convert_nan(row["Purchase cost"])
         category_name = convert_nan(row["Category"])
@@ -1480,7 +1482,7 @@ def asset_excel(_request):
         columns = [
             "Asset name",
             "Description",
-            "Tracking id",
+            "Serial No.",
             "Purchase date",
             "Purchase cost",
             "Category",
@@ -1598,7 +1600,7 @@ def asset_export_excel(request):
             columns={
                 "asset_name": "Asset name",
                 "asset_description": "Description",
-                "asset_tracking_id": "Tracking id",
+                "asset_tracking_id": "Serial No.",
                 "asset_purchase_date": "Purchase date",
                 "asset_purchase_cost": "Purchase cost",
                 "asset_category_id": "Category",
@@ -2116,3 +2118,42 @@ def asset_request_tab(request, emp_id):
         "requests_ids": requests_ids,
     }
     return render(request, "tabs/asset_request_tab.html", context=context)
+
+
+@login_required
+def asset_rule_settings_view(request):
+    """
+    "Asset Rule" settings page, gathering company-scoped asset settings.
+    """
+    company = get_session_company(request)
+    setting, _created = AssetGeneralSetting.objects.get_or_create(company_id=company)
+    return render(
+        request,
+        "asset/settings/asset_rule.html",
+        {"asset_general_setting": setting},
+    )
+
+
+@login_required
+@hx_request_required
+@permission_required("asset.change_assetgeneralsetting")
+def enable_disable_asset_fine(request):
+    """
+    Enables or disables the asset fine feature for the active company.
+    """
+    if request.method == "POST":
+        is_checked = request.POST.get("isChecked")
+        setting_id = request.POST.get("setting_Id")
+        enable = bool(is_checked)
+
+        updated = AssetGeneralSetting.objects.filter(id=setting_id).update(
+            enable_asset_fine=enable
+        )
+
+        if updated:
+            message = _("Asset fine has been successfully {}.").format(
+                _("enabled") if enable else _("disabled")
+            )
+            messages.success(request, message)
+
+    return HttpResponse("")
