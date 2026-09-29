@@ -42,6 +42,10 @@ from horilla.methods import get_horilla_model_class
 from horilla.models import HorillaModel, has_xss, upload_path
 from horilla_audit.methods import get_diff
 from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
+from horilla_auth.methods import (
+    generate_random_password,
+    generate_unique_fallback_username,
+)
 from horilla_auth.models import HorillaUser
 from horilla_views.cbv_methods import render_template
 
@@ -230,7 +234,7 @@ class Employee(models.Model):
                 and self.employee_work_info.reporting_manager_id
                 == request.user.employee_get
             ):
-                return 'style="color: inherit; text-decoration: none; background-color: hsl(38.08deg 100% 50% / 8%);"'
+                return 'style="color: inherit; text-decoration: none; background-color: rgba(255, 166, 0, 0.158);"'
             else:
                 return ""
         else:
@@ -657,7 +661,7 @@ class Employee(models.Model):
             ("view_ownprofile", "View Own Profile"),
         )
         ordering = [
-            "employee_first_name",
+            "id",
         ]
         constraints = [
             models.UniqueConstraint(
@@ -775,17 +779,25 @@ class Employee(models.Model):
         if employee.employee_user_id is None:
             # Create user if no corresponding user exists
             username = self.email
-            password = str(self.phone)
+            password = generate_random_password()
+
+            # The email is unique among Employees, but an unrelated
+            # HorillaUser can already own it as a username -- e.g. an
+            # orphaned account left behind by a deleted employee. Fall back
+            # to a random username rather than crashing on the uniqueness
+            # constraint; email stays the real address either way.
+            if HorillaUser.objects.filter(username=username).exists():
+                username = generate_unique_fallback_username()
 
             user = HorillaUser.objects.create_user(
                 username=username,
-                email=username,
+                email=self.email,
                 password=password,
                 is_new_employee=True,
             )
             if not user:
                 user = HorillaUser.objects.create_user(
-                    username=username, email=username, password=password
+                    username=username, email=self.email, password=password
                 )
             self.employee_user_id = user
             # default permissions

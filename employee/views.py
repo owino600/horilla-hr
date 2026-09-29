@@ -47,6 +47,7 @@ from accessibility.decorators import enter_if_accessible
 from accessibility.methods import update_employee_accessibility_cache
 from accessibility.middlewares import ACCESSIBILITY_CACHE_USER_KEYS
 from accessibility.models import DefaultAccessibility
+from base.backends import ConfiguredEmailBackend
 from base.forms import ModelForm
 from base.methods import (
     choosesubordinates,
@@ -100,6 +101,7 @@ from employee.methods.methods import (
     error_data_template,
     get_ordered_badge_ids,
     process_employee_records,
+    send_employee_invitation,
     set_initial_password,
     valid_import_file_headers,
 )
@@ -113,6 +115,7 @@ from employee.models import (
     EmployeeWorkInformation,
     NoteFiles,
 )
+from employee.threading import InvitationMailSendThread
 from horilla.decorators import (
     hx_request_required,
     logger,
@@ -126,6 +129,7 @@ from horilla.group_by import group_by_queryset
 from horilla.http.response import HorillaRedirect
 from horilla.methods import dynamic_attr, get_horilla_model_class
 from horilla_audit.models import AccountBlockUnblock, HistoryTrackingFields
+from horilla_auth.methods import generate_random_password
 from horilla_auth.models import HorillaUser
 from horilla_documents.forms import (
     DocumentForm,
@@ -1913,6 +1917,13 @@ def employee_create_update_personal_info(request, obj_id=None):
         form.save()
         if obj_id is None:
             messages.success(request, _("New Employee Added."))
+            if send_employee_invitation(
+                form.instance, request.get_host(), request.is_secure()
+            ):
+                messages.success(
+                    request,
+                    _("Invitation sent to %(employee)s.") % {"employee": form.instance},
+                )
             form = EmployeeForm(request.POST, instance=form.instance)
             work_form = EmployeeWorkInformationForm(
                 instance=EmployeeWorkInformation.objects.filter(
@@ -2206,13 +2217,23 @@ def employee_delete(request, obj_id):
     try:
         view = request.POST.get("view")
         employee = Employee.objects.get(id=obj_id)
+        user = employee.employee_user_id
+        if (
+            user is not None
+            and user.is_superuser
+            and Employee.objects.filter(
+                is_active=True, employee_user_id__is_superuser=True
+            ).count()
+            <= 1
+        ):
+            messages.error(request, _("You can't delete the last superuser."))
+            return HorillaRedirect(request, fallback_url=f"/view={view}")
         if apps.is_installed("payroll"):
             if employee.contract_set.all().exists():
                 contracts = employee.contract_set.all()
                 for contract in contracts:
                     if contract.contract_status != "active":
                         contract.delete()
-        user = employee.employee_user_id
         try:
             user.delete()
         except AttributeError:
@@ -2243,17 +2264,25 @@ def employee_bulk_delete(request):
     if not ids:
         messages.error(request, _("No IDs provided."))
     deleted_count = 0
+    active_superuser_count = Employee.objects.filter(
+        is_active=True, employee_user_id__is_superuser=True
+    ).count()
     employees = Employee.objects.filter(id__in=ids).select_related("employee_user_id")
     for employee in employees:
         try:
+            user = employee.employee_user_id
+            if user is not None and user.is_superuser and active_superuser_count <= 1:
+                messages.error(request, _("You can't delete the last superuser."))
+                continue
             if apps.is_installed("payroll"):
                 if employee.contract_set.all().exists():
                     contracts = employee.contract_set.all()
                     for contract in contracts:
                         if contract.contract_status != "active":
                             contract.delete()
-            user = employee.employee_user_id
             user.delete()
+            if user is not None and user.is_superuser:
+                active_superuser_count -= 1
             deleted_count += 1
         except Employee.DoesNotExist:
             messages.error(request, _("Employee not found."))
@@ -2310,6 +2339,131 @@ def employee_bulk_archive(request):
             )
         else:
             messages.warning(request, _("Related data found for {}.").format(employee))
+    return JsonResponse({"message": "Success"})
+
+
+@login_required
+@permission_required("employee.change_employee")
+def employee_reset_password_admin(request, emp_id):
+    """
+    Generates a new random password for one employee and shows it once so
+    the admin can relay it manually -- the password is never emailed,
+    logged, or kept anywhere after this response.
+    """
+    employee = get_object_or_404(Employee, id=emp_id)
+    results = []
+    user = employee.employee_user_id
+    if user == request.user:
+        # Resetting your own password here would change the live
+        # credentials of the session making this request -- Django
+        # invalidates the session's auth hash on password change, logging
+        # the admin out immediately and confusingly mid-action. Route them
+        # to the normal self-service change-password flow instead.
+        messages.warning(
+            request,
+            _(
+                "You can't reset your own password here — use Change Password from your profile menu instead."
+            ),
+        )
+    elif user:
+        new_password = generate_random_password()
+        user.set_password(new_password)
+        user.is_new_employee = True
+        user.save()
+        results.append({"employee": employee, "password": new_password})
+    return render(request, "employee/reset_password_result.html", {"results": results})
+
+
+@login_required
+@permission_required("employee.change_employee")
+@require_http_methods(["POST"])
+def employee_bulk_reset_password_admin(request):
+    """
+    Generates a new random password for each selected employee and shows
+    them once -- same one-time-reveal contract as the individual action.
+    """
+    ids = json.loads(request.POST.get("ids", "[]"))
+    employees = Employee.objects.filter(id__in=ids).select_related("employee_user_id")
+    results = []
+    skipped_self = False
+    for employee in employees:
+        user = employee.employee_user_id
+        if not user:
+            continue
+        if user == request.user:
+            # Same reasoning as the individual action: changing the
+            # requesting admin's own password mid-bulk-action would
+            # invalidate their own session immediately.
+            skipped_self = True
+            continue
+        new_password = generate_random_password()
+        user.set_password(new_password)
+        user.is_new_employee = True
+        user.save()
+        results.append({"employee": employee, "password": new_password})
+    if skipped_self:
+        messages.warning(
+            request,
+            _(
+                "Your own account was skipped — use Change Password from your profile menu instead."
+            ),
+        )
+    return render(request, "employee/reset_password_result.html", {"results": results})
+
+
+@login_required
+@permission_required("employee.change_employee")
+def employee_send_invitation(request, emp_id):
+    """
+    Emails one employee a link to set their own password (reuses the same
+    token/reset-confirm flow as "forgot password"), with invitation-framed
+    copy instead of the generic reset email.
+    """
+    employee = get_object_or_404(Employee, id=emp_id)
+    if not employee.employee_user_id:
+        messages.error(request, _("This employee has no linked login account."))
+        return HorillaRedirect(request)
+
+    sent = send_employee_invitation(employee, request.get_host(), request.is_secure())
+    if sent:
+        messages.success(
+            request, _("Invitation sent to %(employee)s.") % {"employee": employee}
+        )
+    else:
+        messages.error(
+            request,
+            _(
+                "Could not send invitation to %(employee)s. Check the mail server configuration."
+            )
+            % {"employee": employee},
+        )
+    return HorillaRedirect(request)
+
+
+@login_required
+@permission_required("employee.change_employee")
+@require_http_methods(["POST"])
+def employee_bulk_send_invitation(request):
+    """
+    Emails each selected employee an invitation link, sent asynchronously
+    so the request returns immediately regardless of selection size.
+    """
+    ids = json.loads(request.POST.get("ids", "[]"))
+    employees = list(
+        Employee.objects.filter(id__in=ids).select_related("employee_user_id")
+    )
+    if not employees:
+        messages.error(request, _("No IDs provided."))
+        return JsonResponse({"message": "Success"})
+
+    email_backend = ConfiguredEmailBackend()
+    if not email_backend.configuration:
+        messages.error(request, _("Primary mail server is not configured"))
+        return JsonResponse({"message": "Success"})
+
+    thread = InvitationMailSendThread(request, employees)
+    thread.start()
+    messages.info(request, _("Invitations are being sent in the background."))
     return JsonResponse({"message": "Success"})
 
 

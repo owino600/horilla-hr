@@ -9,7 +9,6 @@ from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import gettext_noop
 
-from attendance.cbv.tab_shell import AttendanceTabContentShell
 from employee.cbv.employee_profile import EmployeeProfileView
 from employee.models import Employee
 from horilla.http.response import HorillaRedirect
@@ -19,6 +18,7 @@ from horilla_views.generic.cbv.views import (
     HorillaFormView,
     HorillaListView,
     HorillaNavView,
+    HorillaTabContentShell,
     HorillaTabView,
     TemplateView,
 )
@@ -272,7 +272,7 @@ class ObjectivesTab(HorillaTabView):
             return f"{url}?{query_string}" if query_string else url
 
         all_objectives_tab = {
-            "title": _("All objectives"),
+            "title": _("All Objectives"),
             "url": with_query(reverse("all-objectives-tab-shell")),
             "badge": all_objectives_count,
         }
@@ -282,7 +282,7 @@ class ObjectivesTab(HorillaTabView):
         else:
             self.tabs = [
                 {
-                    "title": _("My objective"),
+                    "title": _("My Objectives"),
                     "url": with_query(reverse("my-objectives-tab-shell")),
                     "badge": assigned_objectives_count,
                 },
@@ -341,6 +341,8 @@ class MyObjectivesNav(_ObjectivesTabNavBase):
     Independent Nav for the My Objectives tab.
     """
 
+    nav_title = _("My Objectives")
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.search_url = reverse("my-objectives-view-tab")
@@ -353,19 +355,21 @@ class AllObjectivesNav(_ObjectivesTabNavBase):
     Independent Nav for the All Objectives tab.
     """
 
+    nav_title = _("All Objectives")
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.search_url = reverse("all-objectives-view-tab")
         self.search_swap_target = "#allObjectivesListContainer"
 
 
-class MyObjectivesTabShell(AttendanceTabContentShell):
+class MyObjectivesTabShell(HorillaTabContentShell):
     nav_url_name = "my-objectives-nav"
     container_id = "myObjectivesListContainer"
     tabs_root_id = "objContainer"
 
 
-class AllObjectivesTabShell(AttendanceTabContentShell):
+class AllObjectivesTabShell(HorillaTabContentShell):
     nav_url_name = "all-objectives-nav"
     container_id = "allObjectivesListContainer"
     tabs_root_id = "objContainer"

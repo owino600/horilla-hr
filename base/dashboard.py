@@ -9,7 +9,7 @@ import json
 from datetime import date, timedelta
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
@@ -532,25 +532,39 @@ def dashboard_kpi_data(request):
     on_leave = len(on_leave_employee_ids)
 
     present_today = 0
+    present_by_work_type = []
     try:
         from attendance.models import Attendance
 
-        present_today = (
-            Attendance.objects.filter(
-                attendance_date=real_today, employee_id__in=emp_qs
-            )
-            .values("employee_id")
-            .distinct()
-            .count()
+        present_qs = Attendance.objects.filter(
+            attendance_date=real_today, employee_id__in=emp_qs
         )
+        present_today = present_qs.values("employee_id").distinct().count()
+        present_by_work_type = list(
+            present_qs.values("work_type_id__work_type")
+            .annotate(count=Count("employee_id", distinct=True))
+            .order_by("-count")
+        )
+        present_by_work_type = [
+            {
+                "label": row["work_type_id__work_type"] or _("Unspecified"),
+                "count": row["count"],
+            }
+            for row in present_by_work_type
+        ]
     except Exception:
         pass
 
     # Expected = active employees not on approved leave (excludes leave from
     # the denominator so "absent" is not inflated by people who should be out).
     expected_today = max(0, total_employees - on_leave)
-    # Employees expected to check in = everyone minus who's already present
-    # minus who's on approved leave — each employee counted at most once.
+    # "Offline" is deliberately the exact remainder of the other two top-row
+    # cards, not the Attendance dashboard's shift-aware "missing punches"
+    # definition (which excludes employees with no shift assigned or whose
+    # shift hasn't started yet) -- Present Today + Offline + On Leave must
+    # always add up to Total Employees for these three cards to read
+    # correctly together. The Attendance dashboard's own Offline card is a
+    # different, more granular metric and isn't held to this identity.
     not_checked_in = max(0, total_employees - present_today - on_leave)
     expected_to_check_in = not_checked_in
     # Keep absent_today as an alias for not_checked_in for API compatibility.
@@ -587,6 +601,7 @@ def dashboard_kpi_data(request):
         {
             "total_employees": total_employees,
             "present_today": present_today,
+            "present_by_work_type": present_by_work_type,
             "absent_today": absent_today,
             "expected_today": expected_today,
             "not_checked_in": not_checked_in,

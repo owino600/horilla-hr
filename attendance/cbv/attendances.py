@@ -15,7 +15,6 @@ from django.utils.translation import gettext_lazy as _
 
 from attendance.cbv.attendance_activity import AttendanceActivityListView
 from attendance.cbv.attendance_tab import AttendanceTabView
-from attendance.cbv.tab_shell import AttendanceTabContentShell
 from attendance.filters import AttendanceFilters
 from attendance.forms import AttendanceExportForm, AttendanceForm, AttendanceUpdateForm
 from attendance.models import Attendance, AttendanceValidationCondition, strtime_seconds
@@ -43,6 +42,7 @@ from horilla_views.generic.cbv.views import (
     HorillaFormView,
     HorillaListView,
     HorillaNavView,
+    HorillaTabContentShell,
     HorillaTabView,
     TemplateView,
 )
@@ -138,6 +138,67 @@ class AttendancesListView(HorillaListView):
         ),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        tomorrow = today + timedelta(days=1)
+        this_week = today + timedelta(days=7)
+
+        self.row_status_indications = (self.row_status_indications or []) + [
+            (
+                "filter--dot",
+                _("Yesterday"),
+                f"""
+                    onclick="
+                        $('#applyFilter').closest('form').find('[name=attendance_date__gte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date__lte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date]').val('{yesterday}');
+                        $('#applyFilter').click();
+                    "
+                """,
+            ),
+            (
+                "filter--dot",
+                _("Today"),
+                f"""
+                    onclick="
+                        $('#applyFilter').closest('form').find('[name=attendance_date__gte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date__lte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date]').val('{today}');
+                        $('#applyFilter').click();
+                    "
+                """,
+            ),
+            (
+                "filter--dot",
+                _("Tomorrow"),
+                f"""
+                    onclick="
+                        $('#applyFilter').closest('form').find('[name=attendance_date__gte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date__lte]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date]').val('{tomorrow}');
+                        $('#applyFilter').click();
+                    "
+                """,
+            ),
+            (
+                "filter--dot",
+                _("This Week"),
+                f"""
+                    onclick="
+                        $('#applyFilter').closest('form').find('[name=attendance_date]').val('');
+                        $('#applyFilter').closest('form').find('[name=attendance_date__gte]').val('{today}');
+                        $('#applyFilter').closest('form').find('[name=attendance_date__lte]').val('{this_week}');
+                        $('#applyFilter').click();
+                    "
+                """,
+            ),
+        ]
+        context["row_status_indications"] = self.row_status_indications
+        return context
 
     # def get_queryset(self, queryset=None, filtered=False, *args, **kwargs):
     #     """
@@ -415,21 +476,21 @@ class ValidatedAttendanceNav(_AttendanceTabNavBase):
         self.actions = _attendance_nav_common_actions(self.request)
 
 
-class ValidateAttendanceTabShell(AttendanceTabContentShell):
+class ValidateAttendanceTabShell(HorillaTabContentShell):
     nav_url_name = "validate-attendance-nav"
     container_id = "validateListContainer"
     tabs_root_id = "attendances-tab"
     selected_instances_key_id = "validateselectedInstances"
 
 
-class OTAttendanceTabShell(AttendanceTabContentShell):
+class OTAttendanceTabShell(HorillaTabContentShell):
     nav_url_name = "ot-attendance-nav"
     container_id = "otListContainer"
     tabs_root_id = "attendances-tab"
     selected_instances_key_id = "overtimeselectedInstances"
 
 
-class ValidatedAttendanceTabShell(AttendanceTabContentShell):
+class ValidatedAttendanceTabShell(HorillaTabContentShell):
     nav_url_name = "validated-attendance-nav"
     container_id = "validatedListContainer"
     tabs_root_id = "attendances-tab"
