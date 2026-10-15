@@ -5,6 +5,8 @@ Payroll related module to write custom calculation methods
 """
 
 import calendar
+import json
+import logging
 from datetime import date, datetime, timedelta
 
 from dateutil.relativedelta import relativedelta
@@ -22,7 +24,11 @@ from base.methods import (
 )
 from base.models import CompanyLeaves, Holidays
 from horilla.methods import get_horilla_model_class
+from payroll.methods.component_formula import ComponentFormulaError
+from payroll.methods.employer_cost import employer_amount
 from payroll.models.models import Contract, Deduction, Payslip
+
+logger = logging.getLogger(__name__)
 
 
 def get_total_days(start_date, end_date):
@@ -44,6 +50,22 @@ def get_total_days(start_date, end_date):
     delta = end_date - start_date
     total_days = delta.days + 1  # Add 1 to include the end date itself
     return total_days
+
+
+def get_total_calendar_days(pay_head_data):
+    """
+    Every day in the pay period, week offs and holidays included.
+
+    Every place that shows "paid days" alongside a total reads it from
+    `pay_head_data["working_days"]`, which excludes week offs and holidays --
+    so a 6-day paid count was shown against 23, not the 31 the period title
+    already says. `start_date`/`end_date` are stored as ISO strings in
+    `pay_head_data` (it is a JSON field), hence the parse rather than a
+    straight `get_total_days` call.
+    """
+    start_date = datetime.strptime(pay_head_data["start_date"], "%Y-%m-%d").date()
+    end_date = datetime.strptime(pay_head_data["end_date"], "%Y-%m-%d").date()
+    return get_total_days(start_date, end_date)
 
 
 def get_leaves(employee, start_date, end_date):
@@ -395,20 +417,46 @@ def daily_computation(employee, wage, start_date, end_date):
     }
 
 
-def get_daily_salary(wage, wage_date) -> dict:
+def get_daily_salary(wage, wage_date, contract=None) -> dict:
     """
-    This method is used to calculate daily salary for the date
+    What one day of unpaid leave costs.
+
+    Two things decide it, and both used to be fixed in this function: which
+    figure a day is a share of, and how many days it is shared between. The
+    divisor in particular is not a detail — a 44,000 wage over 22 working days
+    is 2,000 a day, and over 30 calendar days it is 1,467, so the same absence
+    costs a third less.
+
+    ``contract`` is optional so every existing caller keeps the old behaviour:
+    the contract wage divided by working days.
     """
     last_day = calendar.monthrange(wage_date.year, wage_date.month)[1]
     end_date = date(wage_date.year, wage_date.month, last_day)
     start_date = date(wage_date.year, wage_date.month, 1)
-    working_days = get_working_days(start_date, end_date)["total_working_days"]
-    day_wage = (
-        wage / working_days if working_days else 0.0
-    )  # if working_days != 0 else 0 #769
+
+    base = wage
+    divisor_name = "working_days"
+    if contract is not None:
+        if getattr(contract, "daily_leave_amount_base", "wage") == "monthly_ctc":
+            # Falls back to the wage rather than to zero: a contract with no
+            # CTC set would otherwise make every unpaid day free.
+            base = contract.monthly_ctc or wage
+        divisor_name = getattr(contract, "daily_leave_amount_divisor", "working_days")
+
+    if divisor_name == "calendar_days":
+        days = last_day
+    else:
+        days = get_working_days(start_date, end_date)["total_working_days"]
+
+    day_wage = base / days if days else 0.0
 
     return {
         "day_wage": day_wage,
+        # The two numbers day_wage was divided out of -- exposed so a
+        # payslip can show the actual equation (base ÷ days = day_wage)
+        # rather than only naming which contract settings were used.
+        "base": base,
+        "days": days,
     }
 
 
@@ -652,6 +700,8 @@ def monthly_computation(employee, wage, start_date, end_date, *args, **kwargs):
     #    "contract": contract,
     #}
     paid_days = total_working_days - unpaid_leaves
+    daily_salary = get_daily_salary(wage=wage, wage_date=start_date, contract=contract)
+    daily_computed_salary = daily_salary["day_wage"]
 
     # Company policy:
     # Monthly salaried employees receive their full contracted salary
@@ -663,9 +713,21 @@ def monthly_computation(employee, wage, start_date, end_date, *args, **kwargs):
 
     basic_pay = wage
 
+    # Monthly salary policy: leave does not reduce contracted salary.
+    lop_from_gross = False
     return {
         "basic_pay": basic_pay,
         "loss_of_pay": loss_of_pay,
+        "lop_from_gross": lop_from_gross,
+        "lop_unpaid_days": unpaid_leaves,
+        # .get(), not [] -- get_daily_salary is mocked with the older
+        # {"day_wage": ...}-only shape across a number of existing tests, and
+        # these three keys exist only to power a payslip popover, so a mock
+        # that predates them should degrade to None rather than crash the
+        # whole computation.
+        "lop_base_amount": daily_salary.get("base"),
+        "lop_divisor_days": daily_salary.get("days"),
+        "lop_daily_rate": daily_computed_salary,
         "custom_leave_deduction": custom_leave_deduction,
         "custom_leave_breakdown": custom_leave_breakdown,
         "month_data": month_data,
@@ -698,7 +760,10 @@ def compute_salary_on_period(
         return contract
 
     month_summary = month_summary or {}
-    wage = contract.wage if wage is None else wage
+    # contract.pay_rate, not contract.wage: an hourly contract has its rate in
+    # its own field now, and reading `wage` there would pay a monthly figure
+    # per hour.
+    wage = contract.pay_rate if wage is None else wage
     wage_type = contract.wage_type
     data = None
     if wage_type == "hourly":
@@ -805,25 +870,49 @@ def compute_salary_on_period(
             unpaid_days = month_summary.get("unpaid_leave", 0) + month_summary.get(
                 "absent", 0
             )
+            if month_summary.get("unresolved_conflicts", 0):
+                unpaid_days = total_days
 
-            # Company policy:
-            # Monthly salaried employees receive their full contracted salary
-            # regardless of attendance, absence, or unpaid leave.
-            # Attendance is recorded for HR purposes but does not reduce salary.
-            basic_pay = wage
-            loss_of_pay = 0
+            # Retain upstream salary-rate metadata, but do not deduct leave
+            # or absence from monthly salaried employees.
+            daily_salary = get_daily_salary(
+                wage=wage, wage_date=start_date, contract=contract
+            )
+            daily_computed_salary = daily_salary["day_wage"]
+            leave_data = get_leaves(employee, start_date, end_date)
             custom_leave_deduction = 0
             custom_leave_breakdown = []
+            loss_of_pay = 0
+            lop_from_gross = False
+            basic_pay = wage
 
             data = {
+                "lop_from_gross": lop_from_gross,
+                "lop_unpaid_days": unpaid_days,
+                # .get(): see the identical note in monthly_computation.
+                "lop_base_amount": daily_salary.get("base"),
+                "lop_divisor_days": daily_salary.get("days"),
+                "lop_daily_rate": daily_computed_salary,
                 "basic_pay": basic_pay,
                 "loss_of_pay": loss_of_pay,
                 "custom_leave_deduction": custom_leave_deduction,
                 "custom_leave_breakdown": custom_leave_breakdown,
                 "month_data": months_between_range(wage, start_date, end_date),
                 "unpaid_days": unpaid_days,
-                "paid_days": float(total_days - unpaid_days),
-                "partial_pay_days": month_summary.get("partial_pay_days", 0),
+                # Report paid days consistently with the attendance summary.
+                "paid_days": (
+                    0.0
+                    if month_summary.get("unresolved_conflicts", 0)
+                    else float(
+                        month_summary.get("present", 0)
+                        + month_summary.get("paid_leave", 0)
+                        + month_summary.get("week_off", 0)
+                        + month_summary.get("holiday", 0)
+                    )
+                ),
+                "partial_pay_days": month_summary.get(
+                    "partial_pay_days", leave_data.get("partial_pay_days", 0)
+                ),
                 "present": month_summary.get("present", 0),
                 "paid_leave": month_summary.get("paid_leave", 0),
                 "unpaid_leave": month_summary.get("unpaid_leave", 0),
@@ -919,25 +1008,87 @@ def calculate_employer_contribution(data):
         pay_head_data.get("net_deductions"),
     ]
 
-    for deductions in deductions_to_process:
-        if deductions:
-            for deduction in deductions:
-                if (
-                    deduction.get("deduction_id")
-                    and deduction.get("employer_contribution_rate", 0) > 0
-                ):
-                    object = Deduction.objects.filter(
-                        id=deduction.get("deduction_id")
-                    ).first()
-                    if object:
-                        amount = pay_head_data.get(object.based_on)
-                        employer_contribution_amount = (
-                            amount * object.employer_rate
-                        ) / 100
-                        deduction["based_on"] = object.based_on
-                        deduction["employer_contribution_amount"] = (
-                            employer_contribution_amount
-                        )
+    rows = [
+        deduction
+        for deductions in deductions_to_process
+        if deductions
+        for deduction in deductions
+        if deduction.get("deduction_id")
+    ]
+    if not rows:
+        return data
+
+    # One query for the whole payslip. This used to run a query per deduction
+    # row inside the loop, which on a run of any size is the difference
+    # between one query and several thousand.
+    components = Deduction.objects.entire().in_bulk(
+        {row["deduction_id"] for row in rows}
+    )
+
+    # The codes and amounts every component on this payslip resolved to, which
+    # is what an employer formula is written against -- the same names the
+    # employee-side formulas use, so "(BASIC + DA) * 0.0367" means the same
+    # thing on both sides of the component.
+    context = pay_head_data.get("component_context") or {}
+
+    for deduction in rows:
+        component = components.get(deduction["deduction_id"])
+        if component is None:
+            continue
+
+        try:
+            result = employer_amount(component, pay_head_data, context)
+        except ComponentFormulaError as exc:
+            # Reported against the component and skipped, not raised: a
+            # mistyped employer formula is the employer's own share, and
+            # it must not stop the employee being paid.
+            logger.error(
+                "Employer formula on %s could not be worked out: %s",
+                component,
+                exc,
+            )
+            continue
+        if result is None:
+            continue
+        employer_contribution_amount, formula = result
+        if formula is not None:
+            deduction["employer_contribution_formula"] = formula
+
+        deduction["based_on"] = component.based_on
+        deduction["employer_contribution_amount"] = employer_contribution_amount
+
+    return data
+
+
+def payslip_fields(payslip_data, employee, **extra):
+    """
+    Turn what ``payroll_calculation`` returns into what ``save_payslip`` takes.
+
+    The two dicts use different key names for the same figures — ``deduction``
+    against ``total_deductions``, ``pay_data`` against a JSON string in
+    ``json_data`` — so every caller was translating between them by hand. The
+    same fourteen lines existed in the single payslip view, the bulk view, the
+    scheduler and the create form, which is how one of them came to be the only
+    place that passed ``group_name``.
+
+    ``extra`` carries whatever the caller adds on top: ``status``,
+    ``group_name``, ``payroll_batch``.
+    """
+    data = {
+        "employee": employee,
+        "start_date": payslip_data["start_date"],
+        "end_date": payslip_data["end_date"],
+        "status": "draft",
+        "contract_wage": payslip_data["contract_wage"],
+        "basic_pay": payslip_data["basic_pay"],
+        "gross_pay": payslip_data["gross_pay"],
+        "deduction": payslip_data["total_deductions"],
+        "net_pay": payslip_data["net_pay"],
+        "pay_data": json.loads(payslip_data["json_data"]),
+        "installments": payslip_data["installments"],
+    }
+    data.update(extra)
+    calculate_employer_contribution(data)
     return data
 
 
@@ -952,15 +1103,28 @@ def save_payslip(**kwargs):
     ).first()
     instance = filtered_instance if filtered_instance is not None else Payslip()
     instance.employee_id = kwargs["employee"]
-    instance.group_name = kwargs.get("group_name")
+    # Only when one was given. Assigning kwargs.get() unconditionally meant
+    # that regenerating an existing payslip through any path that does not
+    # pass a name -- the single-payslip view, the scheduler -- erased the
+    # batch it belonged to.
+    if kwargs.get("group_name") is not None:
+        instance.group_name = kwargs["group_name"]
+    if kwargs.get("payroll_batch") is not None:
+        instance.payroll_batch = kwargs["payroll_batch"]
     instance.start_date = kwargs["start_date"]
     instance.end_date = kwargs["end_date"]
     instance.status = kwargs["status"]
     instance.basic_pay = round(kwargs["basic_pay"], 2)
     instance.contract_wage = round(kwargs["contract_wage"], 2)
     instance.gross_pay = round(kwargs["gross_pay"], 2)
-    instance.deduction = round(kwargs["deduction"], 2)
-    instance.net_pay = round(kwargs["net_pay"], 2)
+    # A backstop behind the engine's own cap, because this one field is read
+    # by everything -- the payslip, the run totals, the dashboard, every
+    # export -- and a single stored row where deductions exceed gross makes
+    # all of them disagree with each other at once.
+    instance.deduction = min(
+        round(kwargs["deduction"], 2), round(kwargs["gross_pay"], 2)
+    )
+    instance.net_pay = max(0.0, round(kwargs["net_pay"], 2))
     instance.pay_head_data = kwargs["pay_data"]
     instance.save()
     instance.installment_ids.set(kwargs["installments"])
