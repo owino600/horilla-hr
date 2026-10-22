@@ -1780,6 +1780,28 @@ def employee_view_update(request, obj_id, **kwargs):
                     instance.employee_id = employee
                     instance.save()
                     messages.success(request, _("Employee bank details updated."))
+        # Remember the page the edit form was opened from (list or a profile),
+        # so Back returns there; later requests from the form itself reuse it.
+        back_session_key = f"employee_edit_back_{obj_id}"
+        origin = request.META.get("HTTP_HX_CURRENT_URL") or request.META.get(
+            "HTTP_REFERER", ""
+        )
+        origin_parts = urlparse(origin)
+        origin_path = origin_parts.path
+        if (
+            origin
+            and origin_parts.netloc == request.get_host()
+            and not origin_path.startswith(
+                reverse("employee-view-update", kwargs={"obj_id": obj_id})
+            )
+        ):
+            origin_url = origin_path + (
+                f"?{origin_parts.query}" if origin_parts.query else ""
+            )
+            request.session[back_session_key] = origin_url
+        back_url = request.session.get(
+            back_session_key, f"{reverse('employee-view')}?view=list"
+        )
         use_edit_fragment = request.META.get("HTTP_HX_REQUEST") == "true"
         template_name = (
             "employee/update_form/form_view_fragment.html"
@@ -1801,6 +1823,7 @@ def employee_view_update(request, obj_id, **kwargs):
                 "work_info_history": work_info_history,
                 "container_mode": container_mode,
                 "active_tab": active_tab,
+                "back_url": back_url,
             },
         )
         return response
@@ -3233,7 +3256,10 @@ def work_info_export(request):
     if not selected_fields:
         selected_fields = form.fields["selected_fields"].initial
         id_list = json.loads(request.GET.get("ids", "[]"))
-        employees = Employee.objects.filter(id__in=id_list)
+        # Select by id from the scoped set, not from every employee.
+        employees = filtersubordinatesemployeemodel(
+            request, Employee.objects.all(), "employee.view_employee"
+        ).filter(id__in=id_list)
 
     # Rows ticked in the employee list (the Export modal's instance_ids):
     # export exactly those, on top of whatever filter was applied.
@@ -3441,7 +3467,7 @@ def leave_today_count(request):
         LeaveRequest = get_horilla_model_class(app_label="leave", model="leaverequest")
         leave_today = LeaveRequest.objects.filter(
             Q(start_date__lte=date.today(), end_date__gte=date.today()),
-            status="approved",
+            status__in=["approved", "cancel_requested"],
             is_active=True,
         ).count()
     return HttpResponse(leave_today)
@@ -3468,6 +3494,10 @@ def dashboard_employee(request):
             },
         ],
         "labels": labels,
+        # Stable, untranslated series keys. Consumers used to derive slice
+        # colours and the drill-down filter from the label text, which only
+        # works while the UI is English.
+        "keys": ["active", "inactive"],
     }
     return JsonResponse(response)
 
@@ -3492,10 +3522,6 @@ def dashboard_employee_gender(request):
             },
         ],
         "labels": labels,
-        # Stable, untranslated series keys. Consumers used to derive slice
-        # colours and the drill-down filter from the label text, which only
-        # works while the UI is English.
-        "keys": ["active", "inactive"],
     }
     return JsonResponse(response)
 

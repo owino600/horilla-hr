@@ -79,7 +79,9 @@ def get_leaves(employee, start_date, end_date):
         end_date (obj): the end date till the date needed
     """
     if apps.is_installed("leave"):
-        approved_leaves = employee.leaverequest_set.filter(status="approved")
+        approved_leaves = employee.leaverequest_set.filter(
+            status__in=["approved", "cancel_requested"]
+        )
     else:
         approved_leaves = None
     paid_leave = 0
@@ -256,9 +258,11 @@ def hourly_computation(employee, wage, start_date, end_date):
     # working day here too, matching build_monthly_summary's same rule.
     regularized_dates = set(
         AttendanceConflictResolution.objects.filter(
+            # Worked days, including a split day with a present half ("split:P+A", "split:A+P").
+            Q(resolution__in=("full_present", "half_present", "half_absent"))
+            | Q(resolution__regex=r"^split:(P\+|.+\+P$)"),
             employee_id=employee,
             date__range=(start_date, end_date),
-            resolution__in=("full_present", "half_present"),
         ).values_list("date", flat=True)
     )
 
@@ -347,7 +351,7 @@ def daily_computation(employee, wage, start_date, end_date):
         employee.leaverequest_set.filter(
             unpaid_only_q,
             start_date__in=date_range,
-            status="approved",
+            status__in=["approved", "cancel_requested"],
         )
         .exclude(start_date_breakdown="full_day")
         .count()
@@ -355,7 +359,9 @@ def daily_computation(employee, wage, start_date, end_date):
 
     half_day_leaves_between_period_on_end_date = (
         employee.leaverequest_set.filter(
-            unpaid_only_q, end_date__in=date_range, status="approved"
+            unpaid_only_q,
+            end_date__in=date_range,
+            status__in=["approved", "cancel_requested"],
         )
         .exclude(end_date_breakdown="full_day")
         .exclude(start_date=F("end_date"))
@@ -638,7 +644,7 @@ def monthly_computation(employee, wage, start_date, end_date, *args, **kwargs):
             employee.leaverequest_set.filter(
                 unpaid_only_q,
                 start_date__in=date_range,
-                status="approved",
+                status__in=["approved", "cancel_requested"],
             )
             .exclude(start_date_breakdown="full_day")
             .count()
@@ -647,7 +653,7 @@ def monthly_computation(employee, wage, start_date, end_date, *args, **kwargs):
             employee.leaverequest_set.filter(
                 unpaid_only_q,
                 end_date__in=date_range,
-                status="approved",
+                status__in=["approved", "cancel_requested"],
             )
             .exclude(end_date_breakdown="full_day")
             .exclude(start_date=F("end_date"))
